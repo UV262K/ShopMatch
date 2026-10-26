@@ -49,6 +49,5 @@ The recommender uses purchase history rather than explicit ratings, has limited 
 ## Contributors
 
 - Yuvraj
-- Sagar Raut
 
 No license has been added yet.
