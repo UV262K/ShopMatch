@@ -1,0 +1,19 @@
+# R / RStudio session files
+.RData
+.Rhistory
+.Ruserdata
+.Rproj.user/
+
+# Temporary and OS files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+~$*.xlsx
+
+# Generated analysis output
+outputs/
+
+# Local source data (download separately)
+Online Retail.xlsx
+data.csv
