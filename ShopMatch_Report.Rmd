@@ -1,0 +1,203 @@
+---
+title: "ShopMatch: Regression and Collaborative Filtering for Real-Time Product Suggestions Using E-Commerce Purchase History"
+author: "Group 12: Yuvraj, Sagar Raut"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+geometry: margin=1in
+fontsize: 11pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.align = "center", out.width = "85%")
+if (!file.exists("outputs/results.rds")) source("shopmatch.R")
+r <- readRDS("outputs/results.rds")
+fig <- function(f) file.path("outputs/figures", f)
+fmt <- function(x, d = 3) formatC(x, format = "f", digits = d)
+fmtp <- function(p) ifelse(p < 0.001, "< 0.001", fmt(p, 3))
+simulated <- grepl("SIMULATED", r$data_source)
+```
+
+```{r warn, results='asis'}
+if (simulated) cat("\\textbf{NOTE: this build used simulated data because the real dataset was not found. Re-run shopmatch.R with data.csv present before submitting.}\n")
+```
+
+# Introduction
+
+Online retailers hold detailed purchase histories, yet most visitors only ever see a handful of products. Suggesting the right item at the right moment raises basket size and customer satisfaction. **ShopMatch** is a small recommendation system built from e-commerce purchase history. It combines two families of techniques:
+
+* **Regression models** (multiple linear and logistic) to understand and predict customer behaviour from transaction features.
+* **Item-based collaborative filtering** to generate real-time product suggestions from the purchase patterns of similar items.
+
+All analysis was carried out in R (RStudio); the complete script is `shopmatch.R`.
+
+## Objectives
+
+1. Collect a suitable e-commerce transaction dataset and clean it for analysis.
+2. Explore the data and test hypotheses about customer spending.
+3. Train a logistic regression model to predict whether a customer will buy the best-selling product, and a multiple linear regression model to predict customer spend.
+4. Build and evaluate a collaborative-filtering recommender against baselines.
+5. Present the results with clear visualisations.
+
+# Data Collection and Sourcing
+
+The data source for this run was: **`r r$data_source`**. The dataset (UCI *Online Retail*, also on Kaggle as *E-Commerce Data*) contains transactions of a UK-based online gift retailer, with columns `InvoiceNo`, `StockCode`, `Description`, `Quantity`, `InvoiceDate`, `UnitPrice`, `CustomerID` and `Country`. The raw file has `r format(r$raw_dim[1], big.mark=",")` rows and `r r$raw_dim[2]` columns.
+
+# Data Pre-processing and Wrangling
+
+Missing values per column in the raw data:
+
+```{r missing}
+knitr::kable(r$missing, col.names = c("Column", "Missing values"), format.args = list(big.mark = ","))
+```
+
+The following cleaning steps were applied in order; the table shows how many rows remained after each step.
+
+```{r cleaning}
+knitr::kable(r$cleaning, col.names = c("Step", "Rows remaining"), format.args = list(big.mark = ","))
+```
+
+Customers with no `CustomerID` cannot be linked to a purchase history, cancelled invoices (prefix "C") and non-positive quantities or prices are returns or errors, and codes such as postage or bank charges are not products. After cleaning there are `r format(r$dims$rows_clean, big.mark=",")` transaction lines from `r format(r$dims$customers, big.mark=",")` customers, `r format(r$dims$products, big.mark=",")` products and `r format(r$dims$invoices, big.mark=",")` invoices, covering `r r$dims$date_min` to `r r$dims$date_max`.
+
+For modelling, the `r r$dims$model_products` most widely purchased products were kept, together with customers who bought at least three of them. This gives a purchase matrix of `r format(r$dims$model_customers, big.mark=",")` customers by `r r$dims$model_products` products with a sparsity of `r fmt(r$dims$sparsity * 100, 1)`% (share of customer-product cells with no purchase).
+
+Customer-level features were engineered: number of orders, total items, total spend, average basket value, number of distinct products, days since last purchase (recency) and a UK indicator.
+
+```{r summary}
+knitr::kable(r$summary_stats, col.names = c("Variable", "Mean", "Median", "SD", "Max"),
+             caption = "Customer-level summary statistics", format.args = list(big.mark = ","))
+```
+
+# Exploratory Analysis
+
+```{r f1, fig.cap="Monthly revenue"}
+knitr::include_graphics(fig("01_monthly_revenue.png"))
+```
+
+```{r f2, fig.cap="Top 10 products by units sold"}
+knitr::include_graphics(fig("02_top_products.png"))
+```
+
+```{r f3, fig.cap="Distribution of customer lifetime spend (log scale)"}
+knitr::include_graphics(fig("03_spend_distribution.png"))
+```
+
+```{r f4, fig.cap="Distinct products per basket"}
+knitr::include_graphics(fig("04_basket_size.png"))
+```
+
+```{r f5, fig.cap="Revenue by country"}
+knitr::include_graphics(fig("05_country_revenue.png"))
+```
+
+Customer spend is strongly right-skewed (a few customers spend very large amounts), which is why a log transformation is used in the regression models. Revenue and baskets show the seasonal and sizing patterns visible in the figures above.
+
+# Inferential Analysis
+
+Because spend is heavily skewed, non-parametric tests were used.
+
+```{r tests}
+t <- r$tests; t$statistic <- fmt(t$statistic, 3); t$p_value <- fmtp(t$p_value)
+knitr::kable(t, col.names = c("Test", "Statistic", "p-value"))
+```
+
+A p-value below 0.05 indicates a statistically significant result. In this run the order-count/spend correlation has p `r fmtp(r$tests$p_value[1])`, the UK vs non-UK comparison has p `r fmtp(r$tests$p_value[2])` and the variety-quartile comparison has p `r fmtp(r$tests$p_value[3])`.
+
+# Model Training
+
+## Logistic regression: will a customer buy the best-selling product?
+
+The target is whether a customer purchased **`r r$target$name`** (`r r$target$code`), bought by `r fmt(r$target$prevalence * 100, 1)`% of modelled customers. To avoid leakage, all predictors are computed from purchases *excluding* that product. The data were split 80/20 (stratified): `r r$logit_eval$n_train` training and `r r$logit_eval$n_test` test customers.
+
+```{r logit_coef}
+lc <- r$logit_coef; lc$estimate <- fmt(lc$estimate); lc$odds_ratio <- fmt(lc$odds_ratio); lc$p_value <- fmtp(lc$p_value)
+knitr::kable(lc, col.names = c("Term", "Coefficient", "Odds ratio", "p-value"),
+             caption = "Logistic regression coefficients (training set)")
+```
+
+## Multiple linear regression: customer total spend
+
+The response is log(total spend); predictors are log orders, log distinct products, recency and UK indicator (`r r$lm_eval$n_train` training, `r r$lm_eval$n_test` test customers).
+
+```{r lm_coef}
+lm_c <- r$lm_coef; lm_c$estimate <- fmt(lm_c$estimate); lm_c$std_error <- fmt(lm_c$std_error); lm_c$p_value <- fmtp(lm_c$p_value)
+knitr::kable(lm_c, col.names = c("Term", "Coefficient", "Std. error", "p-value"),
+             caption = "Linear regression coefficients (training set)")
+```
+
+## Item-based collaborative filtering
+
+Each product is represented by the vector of customers who bought it. The cosine similarity between two products measures how often they are bought by the same people. To recommend for a customer, each product is scored by the sum of its similarities to items the customer already owns, owned items are removed, and the highest scores are suggested. Because this is a single matrix product, recommendations are produced instantly, which supports real-time use.
+
+```{r f10, fig.cap="Item-item cosine similarity for the 15 most popular products"}
+knitr::include_graphics(fig("10_similarity_heatmap.png"))
+```
+
+# Model Testing and Evaluation
+
+## Logistic regression
+
+On the held-out test set (decision threshold `r fmt(r$logit_eval$threshold, 2)`, chosen on training data to maximise F1): AUC **`r fmt(r$logit_eval$auc)`**, accuracy **`r fmt(r$logit_eval$accuracy)`** (majority-class baseline `r fmt(r$logit_eval$majority_baseline)`), precision `r fmt(r$logit_eval$precision)`, recall `r fmt(r$logit_eval$recall)`, F1 `r fmt(r$logit_eval$f1)`. An AUC of 0.5 equals random guessing and 1.0 is perfect separation.
+
+```{r f6, fig.cap="ROC curve on the test set"}
+knitr::include_graphics(fig("06_roc_curve.png"))
+```
+
+```{r f7, fig.cap="Confusion matrix on the test set", out.width="55%"}
+knitr::include_graphics(fig("07_confusion_matrix.png"))
+```
+
+## Linear regression
+
+On the test set, R-squared is **`r fmt(r$lm_eval$r2_test)`** (training adjusted R-squared `r fmt(r$lm_eval$adj_r2)`), with RMSE `r fmt(r$lm_eval$rmse_log)` and MAE `r fmt(r$lm_eval$mae_log)` on the log scale.
+
+```{r f8, fig.cap="Predicted vs actual log(total spend) on the test set"}
+knitr::include_graphics(fig("08_lm_pred_vs_actual.png"))
+```
+
+## Collaborative filtering
+
+Evaluation uses leave-one-out: one purchased product per customer is hidden, the model is fitted on the remaining purchases, and we check whether the hidden product appears in the top K suggestions (hit rate) and how high it ranks (MRR). Popularity and random recommenders serve as baselines.
+
+```{r cf}
+cf <- r$cf_eval
+knitr::kable(cf, col.names = c("Model", "HitRate@5", "HitRate@10", "HitRate@20", "MRR"),
+             caption = "Recommendation performance (leave-one-out)")
+```
+
+```{r f9, fig.cap="Hit rate of each recommender"}
+knitr::include_graphics(fig("09_cf_hit_rate.png"))
+```
+
+Example real-time recommendations for three randomly chosen customers:
+
+```{r ex}
+ex <- r$examples
+knitr::kable(ex, col.names = c("Customer", "Rank", "Stock code", "Recommended product", "Score"))
+```
+
+# Conclusion
+
+The cleaned purchase history shows highly skewed customer spend and a sparse customer-product matrix. The item-based collaborative filter reached a top-10 hit rate of `r fmt(r$cf_eval$HitRate_at_10[1], 3)` compared with `r fmt(r$cf_eval$HitRate_at_10[2], 3)` for the popularity baseline and `r fmt(r$cf_eval$HitRate_at_10[3], 3)` for random suggestions. The logistic model achieved an AUC of `r fmt(r$logit_eval$auc)` for predicting purchase of the best-selling product, and the linear model explained `r fmt(r$lm_eval$r2_test * 100, 1)`% of the variance in log customer spend on unseen customers.
+
+## Limitations and future work
+
+* Only implicit (purchase / no purchase) feedback is used; ratings or browsing data would help.
+* Cold-start customers with no history cannot be served by collaborative filtering; popularity or content-based fallbacks are needed.
+* Only the 100 most popular products were modelled; the long tail is excluded.
+* Future work: matrix factorisation, Random Forest on customer features, time-aware splits and online A/B testing.
+
+# References
+
+1. Chen, D. (2015). *Online Retail* dataset. UCI Machine Learning Repository. https://archive.ics.uci.edu/dataset/352/online+retail
+2. Sarwar, B., Karypis, G., Konstan, J., Riedl, J. (2001). Item-based collaborative filtering recommendation algorithms. *Proceedings of WWW10*.
+3. R Core Team. *R: A Language and Environment for Statistical Computing.* https://www.r-project.org
+4. Wickham, H. et al. *ggplot2* and *dplyr* packages for R.
+
+# Appendix: Source Code
+
+The full R script is provided as `shopmatch.R` alongside this report.
